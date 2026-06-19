@@ -36,6 +36,9 @@ yarn-error.log*
 # vercel
 .vercel
 
-# typescript
+# whatsapp-web.js session & cache (kept outside project via LocalAuth dataPath)
+.wwebjs_auth/
+.wwebjs_cache/
+
 *.tsbuildinfo
 next-env.d.ts

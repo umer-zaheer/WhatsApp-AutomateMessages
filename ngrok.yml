@@ -1,0 +1,8 @@
+version: 3
+agent:
+  authtoken: ${NGROK_AUTHTOKEN}
+endpoints:
+  - name: whatsapp
+    url: https://untradeable-molly-metatrophic.ngrok-free.dev
+    upstream:
+      url: http://localhost:3000

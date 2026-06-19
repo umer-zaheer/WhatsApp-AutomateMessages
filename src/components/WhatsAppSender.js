@@ -6,6 +6,7 @@ import {
   CheckCircle2,
   FileSpreadsheet,
   Loader2,
+  LogOut,
   MessageSquare,
   Paperclip,
   Phone,
@@ -182,6 +183,7 @@ export default function WhatsAppSender() {
   const [results, setResults] = useState(null);
   const [error, setError] = useState(null);
   const [resetting, setResetting] = useState(false);
+  const [disconnecting, setDisconnecting] = useState(false);
   const [now, setNow] = useState(Date.now());
 
   const fetchStatus = useCallback(async () => {
@@ -208,6 +210,35 @@ export default function WhatsAppSender() {
     const tick = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(tick);
   }, []);
+
+  async function handleDisconnect() {
+    setDisconnecting(true);
+    setError(null);
+
+    try {
+      const res = await fetch("/api/whatsapp", {
+        method: "PATCH",
+        credentials: "include",
+        headers: { "ngrok-skip-browser-warning": "true" },
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed to disconnect");
+
+      setConnection({
+        status: "disconnected",
+        qrDataUrl: null,
+        ready: false,
+        error: null,
+        loadingMessage: null,
+      });
+
+      await fetchStatus();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setDisconnecting(false);
+    }
+  }
 
   async function handleReset(clearAuth = false) {
     setResetting(true);
@@ -443,10 +474,25 @@ export default function WhatsAppSender() {
                 key="ready"
                 initial={{ opacity: 0, y: 6 }}
                 animate={{ opacity: 1, y: 0 }}
-                className="alert-success flex items-center gap-2.5 rounded-xl px-4 py-3"
+                className="space-y-3"
               >
-                <CheckCircle2 className="h-4 w-4 shrink-0" />
-                <p className="text-sm font-medium">Connected — ready to send.</p>
+                <div className="alert-success flex items-center gap-2.5 rounded-xl px-4 py-3">
+                  <CheckCircle2 className="h-4 w-4 shrink-0" />
+                  <p className="text-sm font-medium">Connected — ready to send.</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleDisconnect}
+                  disabled={disconnecting}
+                  className="segment-idle inline-flex w-full items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-xs font-semibold disabled:opacity-50 sm:w-auto"
+                >
+                  {disconnecting ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <LogOut className="h-3.5 w-3.5" />
+                  )}
+                  Disconnect WhatsApp
+                </button>
               </motion.div>
             )}
 

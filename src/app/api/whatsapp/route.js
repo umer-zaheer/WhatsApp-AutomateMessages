@@ -9,6 +9,7 @@ import { normalizePhoneNumber } from "@/lib/phone";
 import {
   clearAuthData,
   destroySession,
+  disconnectSession,
   getClient,
   getWhatsAppState,
   normalizeSessionId,
@@ -39,6 +40,18 @@ function withSessionCookie(response, sessionId, isNew) {
       maxAge: COOKIE_MAX_AGE,
     });
   }
+
+  return response;
+}
+
+function clearSessionCookie(response) {
+  response.cookies.set(SESSION_COOKIE, "", {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "lax",
+    path: "/",
+    maxAge: 0,
+  });
 
   return response;
 }
@@ -239,6 +252,30 @@ export async function POST(request) {
     );
   } finally {
     await removeSavedFiles(savedFiles);
+  }
+}
+
+export async function PATCH(request) {
+  try {
+    const existing = request.cookies.get(SESSION_COOKIE)?.value;
+    const sessionId = normalizeSessionId(existing);
+
+    if (sessionId) {
+      await disconnectSession(sessionId);
+    }
+
+    const response = NextResponse.json({
+      success: true,
+      status: "disconnected",
+      ready: false,
+    });
+
+    return clearSessionCookie(response);
+  } catch (error) {
+    return NextResponse.json(
+      { success: false, error: error.message },
+      { status: 500 }
+    );
   }
 }
 

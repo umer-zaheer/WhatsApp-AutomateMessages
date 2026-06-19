@@ -254,6 +254,32 @@ export async function clearAuthData(sessionId) {
   await rm(authSessionPath(id), { recursive: true, force: true }).catch(() => {});
 }
 
+export async function disconnectSession(sessionId) {
+  const id = normalizeSessionId(sessionId);
+  if (!id) return;
+
+  const sessions = getSessionsMap();
+  const session = sessions.get(id);
+
+  if (session) {
+    sessions.delete(id);
+
+    try {
+      await session.client.logout();
+    } catch (error) {
+      console.warn(`[whatsapp] logout failed for ${id}:`, error.message);
+      try {
+        await session.client.destroy();
+      } catch (destroyError) {
+        console.warn(`[whatsapp] destroy failed for ${id}:`, destroyError.message);
+      }
+    }
+  }
+
+  await clearAuthData(id);
+  await prepareBrowserProfile(id);
+}
+
 export async function restartSession(sessionId) {
   await destroySession(sessionId);
   const session = getOrCreateSession(sessionId);

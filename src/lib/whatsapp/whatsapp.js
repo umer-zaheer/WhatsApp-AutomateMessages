@@ -10,6 +10,7 @@ const execFileAsync = promisify(execFile);
 const authDataPath = path.join(os.homedir(), ".whatsapp-sender", "wwebjs_auth");
 const SESSION_ID_REGEX = /^[a-zA-Z0-9_-]+$/;
 const GLOBAL_KEY = "__whatsapp_sender_sessions__";
+const LISTENERS_KEY = "__whatsapp_session_listeners__";
 const INIT_TIMEOUT_MS = 90_000;
 
 const PUPPETEER_ARGS = [
@@ -37,6 +38,43 @@ function createState() {
     loadingMessage: null,
     startedAt: Date.now(),
   };
+}
+
+function getListenersMap() {
+  if (!globalThis[LISTENERS_KEY]) {
+    globalThis[LISTENERS_KEY] = new Map();
+  }
+  return globalThis[LISTENERS_KEY];
+}
+
+export function subscribeToSession(sessionId, listener) {
+  const id = normalizeSessionId(sessionId);
+  if (!id) {
+    return () => {};
+  }
+
+  const listeners = getListenersMap();
+  if (!listeners.has(id)) {
+    listeners.set(id, new Set());
+  }
+
+  listeners.get(id).add(listener);
+
+  return () => {
+    listeners.get(id)?.delete(listener);
+  };
+}
+
+function emitSessionUpdate(sessionId) {
+  const id = normalizeSessionId(sessionId);
+  if (!id) return;
+
+  const listeners = getListenersMap().get(id);
+  if (!listeners) return;
+
+  for (const listener of listeners) {
+    listener();
+  }
 }
 
 function authSessionPath(sessionId) {
@@ -94,18 +132,22 @@ function isBrowserAlreadyRunningError(error) {
   return /browser is already running/i.test(error?.message || "");
 }
 
-function attachClientEvents(client, state) {
+function attachClientEvents(client, state, sessionId) {
+  const emit = () => emitSessionUpdate(sessionId);
+
   client.on("qr", (qr) => {
     state.status = "qr";
     state.qr = qr;
     state.error = null;
     state.loadingMessage = null;
+    emit();
   });
 
   client.on("authenticated", () => {
     state.status = "authenticated";
     state.qr = null;
     state.error = null;
+    emit();
   });
 
   client.on("ready", () => {
@@ -113,6 +155,7 @@ function attachClientEvents(client, state) {
     state.qr = null;
     state.error = null;
     state.loadingMessage = null;
+    emit();
   });
 
   client.on("auth_failure", (message) => {
@@ -120,6 +163,7 @@ function attachClientEvents(client, state) {
     state.qr = null;
     state.error =
       typeof message === "string" ? message : "Authentication failed.";
+    emit();
   });
 
   client.on("disconnected", (reason) => {
@@ -127,10 +171,14 @@ function attachClientEvents(client, state) {
     state.qr = null;
     state.error =
       typeof reason === "string" ? reason : "Disconnected from WhatsApp.";
+    emit();
   });
 
   client.on("loading_screen", (percent, message) => {
-    state.loadingMessage = message || `Loading ${percent}%`;
+    const nextMessage = message || `Loading ${percent}%`;
+    if (state.loadingMessage === nextMessage) return;
+    state.loadingMessage = nextMessage;
+    emit();
   });
 }
 
@@ -149,6 +197,7 @@ function scheduleInitTimeout(sessionId) {
     } catch (error) {
       session.state.status = "error";
       session.state.error = error.message;
+      emitSessionUpdate(sessionId);
     }
   }, INIT_TIMEOUT_MS);
 }
@@ -163,6 +212,7 @@ async function startClient(session, { isRetry = false } = {}) {
     ? "Recovering stale browser session…"
     : "Launching browser…";
   state.startedAt = Date.now();
+  emitSessionUpdate(sessionId);
 
   scheduleInitTimeout(sessionId);
 
@@ -183,6 +233,7 @@ async function startClient(session, { isRetry = false } = {}) {
     state.status = "error";
     state.error = error.message || "Failed to start WhatsApp client.";
     state.loadingMessage = null;
+    emitSessionUpdate(sessionId);
   }
 }
 
@@ -199,7 +250,7 @@ function createSession(sessionId) {
     },
   });
 
-  attachClientEvents(client, state);
+  attachClientEvents(client, state, sessionId);
 
   const session = { client, state, sessionId, initPromise: null };
   session.initPromise = startClient(session);

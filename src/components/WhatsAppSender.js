@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
   CheckCircle2,
@@ -8,6 +8,7 @@ import {
   Loader2,
   LogOut,
   MessageSquare,
+  Mic,
   Paperclip,
   Phone,
   QrCode,
@@ -22,6 +23,7 @@ import {
 } from "lucide-react";
 import { parseCsvNumbers, parsePhoneNumbers, readCsvText } from "@/lib/phone";
 import ThemeToggle from "./ThemeToggle";
+import VoiceRecorder from "./VoiceRecorder";
 
 const STATUS_LABELS = {
   initializing: "Starting WhatsApp client…",
@@ -160,9 +162,12 @@ function ResultBadge({ status, error }) {
     );
   }
   return (
-    <span className="result-fail inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-semibold">
-      <XCircle className="h-3 w-3" />
-      {error || "Failed"}
+    <span
+      className="result-fail inline-flex max-w-[55%] items-center gap-1 rounded-full px-2.5 py-1 text-xs font-semibold"
+      title={error || "Failed"}
+    >
+      <XCircle className="h-3 w-3 shrink-0" />
+      <span className="truncate">{error || "Failed"}</span>
     </span>
   );
 }
@@ -184,7 +189,10 @@ export default function WhatsAppSender() {
   const [error, setError] = useState(null);
   const [resetting, setResetting] = useState(false);
   const [disconnecting, setDisconnecting] = useState(false);
+  const [checkingConnection, setCheckingConnection] = useState(false);
   const [now, setNow] = useState(Date.now());
+  const csvInputRef = useRef(null);
+  const eventSourceRef = useRef(null);
 
   const fetchStatus = useCallback(async () => {
     try {
@@ -200,11 +208,58 @@ export default function WhatsAppSender() {
     }
   }, []);
 
+  const connectEvents = useCallback(() => {
+    eventSourceRef.current?.close();
+
+    const source = new EventSource("/api/whatsapp/events", {
+      withCredentials: true,
+    });
+    eventSourceRef.current = source;
+
+    source.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        if (data.error) {
+          setError(data.error);
+          return;
+        }
+        setConnection(data);
+      } catch {
+        // Ignore malformed event payloads.
+      }
+    };
+
+    source.onerror = () => {
+      source.close();
+      if (eventSourceRef.current === source) {
+        eventSourceRef.current = null;
+      }
+    };
+  }, []);
+
   useEffect(() => {
-    fetchStatus();
-    const interval = setInterval(fetchStatus, 2500);
-    return () => clearInterval(interval);
-  }, [fetchStatus]);
+    let active = true;
+
+    (async () => {
+      await fetchStatus();
+      if (active) connectEvents();
+    })();
+
+    return () => {
+      active = false;
+      eventSourceRef.current?.close();
+      eventSourceRef.current = null;
+    };
+  }, [fetchStatus, connectEvents]);
+
+  async function handleCheckConnection() {
+    setCheckingConnection(true);
+    try {
+      await fetchStatus();
+    } finally {
+      setCheckingConnection(false);
+    }
+  }
 
   useEffect(() => {
     const tick = setInterval(() => setNow(Date.now()), 1000);
@@ -233,6 +288,7 @@ export default function WhatsAppSender() {
       });
 
       await fetchStatus();
+      connectEvents();
     } catch (err) {
       setError(err.message);
     } finally {
@@ -263,6 +319,7 @@ export default function WhatsAppSender() {
         error: null,
         loadingMessage: null,
       });
+      connectEvents();
     } catch (err) {
       setError(err.message);
     } finally {
@@ -293,6 +350,26 @@ export default function WhatsAppSender() {
       setError(err.message);
       e.target.value = "";
     }
+  }
+
+  function removeCsv() {
+    setCsvFile(null);
+    setCsvNumbers([]);
+    setError(null);
+    if (csvInputRef.current) {
+      csvInputRef.current.value = "";
+    }
+  }
+
+  function handleRecordedAudio(file) {
+    setError(null);
+
+    if (!file || file.size === 0) {
+      setError("Recording is empty. Try recording for at least one second.");
+      return;
+    }
+
+    setAttachments((current) => [...current, file]);
   }
 
   function handleAttachmentChange(e) {
@@ -466,6 +543,19 @@ export default function WhatsAppSender() {
                 <p className="text-muted max-w-[260px] text-center text-xs leading-relaxed">
                   Open WhatsApp → Linked devices → Link a device → scan this code
                 </p>
+                <button
+                  type="button"
+                  onClick={handleCheckConnection}
+                  disabled={checkingConnection}
+                  className="btn-primary inline-flex items-center gap-2 rounded-xl px-4 py-2 text-xs font-semibold disabled:opacity-50"
+                >
+                  {checkingConnection ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <Wifi className="h-3.5 w-3.5" />
+                  )}
+                  {checkingConnection ? "Checking…" : "Refresh status"}
+                </button>
               </motion.div>
             )}
 
@@ -608,6 +698,7 @@ export default function WhatsAppSender() {
                         </span>
                       </div>
                       <input
+                        ref={csvInputRef}
                         id="csv-upload"
                         type="file"
                         accept=".csv,text/csv"
@@ -616,10 +707,22 @@ export default function WhatsAppSender() {
                       />
                     </label>
                     {csvFile && (
-                      <p className="text-accent flex items-center gap-1.5 text-xs font-medium">
-                        <FileSpreadsheet className="h-3.5 w-3.5" />
-                        {csvNumbers.length} loaded from {csvFile.name}
-                      </p>
+                      <div className="result-row flex items-center justify-between gap-3 rounded-xl px-3 py-2">
+                        <p className="text-accent flex min-w-0 items-center gap-1.5 text-xs font-medium">
+                          <FileSpreadsheet className="h-3.5 w-3.5 shrink-0" />
+                          <span className="truncate">
+                            {csvNumbers.length} loaded from {csvFile.name}
+                          </span>
+                        </p>
+                        <button
+                          type="button"
+                          onClick={removeCsv}
+                          className="text-muted hover:text-primary shrink-0 rounded p-1 transition"
+                          aria-label={`Remove ${csvFile.name}`}
+                        >
+                          <X className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
                     )}
                   </motion.div>
                 )}
@@ -640,7 +743,7 @@ export default function WhatsAppSender() {
                 rows={4}
                 value={message}
                 onChange={(e) => setMessage(e.target.value)}
-                placeholder="Write your message here… (used as caption when sending files)"
+                placeholder="Write your message here… (caption on images · separate text with audio)"
                 className="field w-full resize-y rounded-xl px-4 py-3 text-sm"
               />
             </div>
@@ -666,17 +769,19 @@ export default function WhatsAppSender() {
                     Attach files
                   </span>
                   <span className="text-muted mt-0.5 block text-xs">
-                    Images, videos, PDFs, and other documents
+                    Images, videos, audio, PDFs, and documents
                   </span>
                 </div>
                 <input
                   id="file-upload"
                   type="file"
                   multiple
+                  accept="image/*,video/*,audio/*,.pdf,.doc,.docx"
                   onChange={handleAttachmentChange}
                   className="sr-only"
                 />
               </label>
+              <VoiceRecorder onRecorded={handleRecordedAudio} disabled={!isReady} />
               {attachments.length > 0 && (
                 <ul className="space-y-1.5">
                   {attachments.map((file, index) => (
@@ -684,8 +789,14 @@ export default function WhatsAppSender() {
                       key={`${file.name}-${file.size}-${index}`}
                       className="result-row flex items-center justify-between gap-3 rounded-xl px-3 py-2"
                     >
-                      <span className="text-secondary truncate text-xs font-medium">
+                      <span className="text-secondary flex min-w-0 items-center gap-1.5 truncate text-xs font-medium">
+                        {/\.(m4a|webm|ogg|mp3|wav|aac|opus)$/i.test(file.name) ? (
+                          <Mic className="text-accent h-3.5 w-3.5 shrink-0" />
+                        ) : null}
                         {file.name}
+                        <span className="text-muted shrink-0">
+                          ({Math.max(1, Math.round(file.size / 1024))} KB)
+                        </span>
                       </span>
                       <button
                         type="button"

@@ -3,9 +3,16 @@ import { mkdir, unlink, writeFile } from "fs/promises";
 import os from "os";
 import path from "path";
 import { NextResponse } from "next/server";
-import QRCode from "qrcode";
-import { MessageMedia } from "whatsapp-web.js";
 import { normalizePhoneNumber } from "@/lib/phone";
+import {
+  buildMediaCache,
+  cloneMediaFromCache,
+  FAST_SEND_OPTIONS,
+  isAudioFilename,
+  prepareAudioForWhatsApp,
+  whatsappChatId,
+} from "@/lib/audio/convert";
+import { buildConnectionPayload } from "@/lib/whatsapp/status";
 import {
   clearAuthData,
   destroySession,
@@ -117,24 +124,7 @@ async function parseSendPayload(request) {
 export async function GET(request) {
   try {
     const { sessionId, isNew } = resolveSession(request);
-    const { status, qr, error, loadingMessage, startedAt } =
-      getWhatsAppState(sessionId);
-    let qrDataUrl = null;
-
-    if (qr) {
-      qrDataUrl = await QRCode.toDataURL(qr, { width: 280, margin: 2 });
-    }
-
-    const response = NextResponse.json({
-      status,
-      qrDataUrl,
-      ready: status === "ready",
-      sessionId,
-      error,
-      loadingMessage,
-      startedAt,
-    });
-
+    const response = NextResponse.json(await buildConnectionPayload(sessionId));
     return withSessionCookie(response, sessionId, isNew);
   } catch (error) {
     return NextResponse.json(
@@ -175,6 +165,29 @@ export async function POST(request) {
 
     savedFiles = await saveUploadedFiles(sessionId, files);
 
+    const uploadedCount = files.filter(
+      (file) => file instanceof File && file.size > 0
+    ).length;
+
+    if (uploadedCount > 0 && savedFiles.length === 0) {
+      const response = NextResponse.json(
+        {
+          success: false,
+          error: "Attachments were empty or could not be saved. Re-record or re-attach the file.",
+        },
+        { status: 400 }
+      );
+      return withSessionCookie(response, sessionId, isNew);
+    }
+
+    savedFiles = await Promise.all(
+      savedFiles.map((file) =>
+        isAudioFilename(file.filename)
+          ? prepareAudioForWhatsApp(file)
+          : Promise.resolve(file)
+      )
+    );
+
     if (!trimmedMessage && savedFiles.length === 0) {
       const response = NextResponse.json(
         {
@@ -186,40 +199,41 @@ export async function POST(request) {
       return withSessionCookie(response, sessionId, isNew);
     }
 
+    const hasAudio = savedFiles.some((file) => isAudioFilename(file.filename));
+    const sendTextSeparately = trimmedMessage && hasAudio;
+    const mediaCache = savedFiles.length > 0 ? buildMediaCache(savedFiles) : [];
     const results = [];
 
     for (const number of numbers) {
       const normalized = normalizePhoneNumber(number);
       if (!normalized) continue;
 
+      const chatId = whatsappChatId(normalized);
+
       try {
-        const numberId = await client.getNumberId(normalized);
+        if (mediaCache.length > 0) {
+          if (sendTextSeparately) {
+            await client.sendMessage(chatId, trimmedMessage, FAST_SEND_OPTIONS);
+          }
 
-        if (!numberId) {
-          results.push({
-            number: normalized,
-            status: "not_registered",
-          });
-          continue;
-        }
-
-        const chatId = numberId._serialized;
-
-        if (savedFiles.length > 0) {
-          for (let i = 0; i < savedFiles.length; i += 1) {
-            const { filePath, filename } = savedFiles[i];
-            const media = MessageMedia.fromFilePath(filePath);
-            media.filename = filename;
-            const caption = i === 0 && trimmedMessage ? trimmedMessage : undefined;
+          for (let i = 0; i < mediaCache.length; i += 1) {
+            const media = cloneMediaFromCache(mediaCache[i]);
+            const caption =
+              !sendTextSeparately && i === 0 && trimmedMessage
+                ? trimmedMessage
+                : undefined;
 
             if (caption) {
-              await client.sendMessage(chatId, media, { caption });
+              await client.sendMessage(chatId, media, {
+                ...FAST_SEND_OPTIONS,
+                caption,
+              });
             } else {
-              await client.sendMessage(chatId, media);
+              await client.sendMessage(chatId, media, FAST_SEND_OPTIONS);
             }
           }
         } else {
-          await client.sendMessage(chatId, trimmedMessage);
+          await client.sendMessage(chatId, trimmedMessage, FAST_SEND_OPTIONS);
         }
 
         results.push({
@@ -227,6 +241,14 @@ export async function POST(request) {
           status: "sent",
         });
       } catch (err) {
+        if (/not registered|invalid wid|phone number.*not/i.test(err.message)) {
+          results.push({
+            number: normalized,
+            status: "not_registered",
+          });
+          continue;
+        }
+
         results.push({
           number: normalized,
           status: "failed",
